@@ -1,0 +1,51 @@
+Railway Brain Starter - Build and test notes
+
+1. Install dependencies
+   npm install
+
+2. Run locally in dev mode
+   npm run dev
+
+3. Type-check
+   npm run check
+
+4. Build
+   npm run build
+
+5. Start built version
+   npm start
+
+6. Quick curl checks
+   GET /health
+   GET /version
+
+7. Example turn call
+curl -X POST http://localhost:3000/runtime/tamar-turn \
+  -H 'content-type: application/json' \
+  -d '{
+    "channel": "whatsapp",
+    "messageId": "msg-1",
+    "phone": "972512345678",
+    "messageText": "תראי לי הכל",
+    "recentInteractions": [],
+    "offersSnapshot": []
+  }'
+
+8. Expected current behavior
+   - browse / show-all messages return a deterministic list of active offers from offersSnapshot
+   - price questions try to resolve a matching offer and answer price only when known
+   - handoff-like messages return mode=handoff and queue handoff state
+   - direct destination interest tries to resolve a matching active offer
+   - every response includes version metadata and a trace scaffold
+
+9. Supabase integration toggles
+   - RUNTIME_LOAD_OFFERS_FROM_SUPABASE=true  => load active offers from Supabase when no offersSnapshot is provided
+   - RUNTIME_LOAD_LEAD_FROM_SUPABASE=true    => load contact/lead by phone when no contactId is known
+   - RUNTIME_WRITEBACKS_TO_SUPABASE=true     => persist interactions/contact updates/trace logs
+
+10. Meta webhook paths
+   - GET  /webhooks/meta   => verification
+   - POST /webhooks/meta   => inbound WhatsApp text handling
+
+11. Next implementation priority
+   harden Meta path with idempotency, contact creation, status callbacks, and stronger objection/closing logic
