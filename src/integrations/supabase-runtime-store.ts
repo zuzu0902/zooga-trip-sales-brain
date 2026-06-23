@@ -123,6 +123,34 @@ export async function fetchLeadContextByPhone(phone: string): Promise<{
   };
 }
 
+export async function generateReplyViaBridge(payload: {
+  identity: Record<string, unknown>;
+  turn_context: Record<string, unknown>;
+  objective: Record<string, unknown>;
+  hard_rules: string[];
+  must_include?: string[];
+  must_not_include?: string[];
+  fallback_reply: string;
+}): Promise<{
+  replyText: string;
+  usedFallback: boolean;
+  raw: Record<string, unknown>;
+}> {
+  const result = await bridgeFetch('/api/public/runtime/generate-reply', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+
+  const replyText = asString(result.reply_text) ?? payload.fallback_reply;
+  const usedFallback = Boolean(result.used_fallback) || replyText === payload.fallback_reply;
+
+  return {
+    replyText,
+    usedFallback,
+    raw: result,
+  };
+}
+
 export async function fetchActiveOffersFromSupabase(): Promise<RuntimeOffer[]> {
   throw new Error('Direct offer fetch is disabled. Use fetchLeadContextByPhone via Lovable bridge.');
 }

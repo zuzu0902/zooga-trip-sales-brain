@@ -1,7 +1,7 @@
 import type { TamarTurnRequest, TamarTurnResponse } from '../types/tamar-turn.js';
 import { versionInfo } from '../version.js';
 import { loadRuntimeLead, loadRuntimeOffers, type RuntimeLead, type RuntimeOffer } from '../integrations/runtime-data.js';
-import { fetchLeadContextByPhone } from '../integrations/supabase-runtime-store.js';
+import { fetchLeadContextByPhone, generateReplyViaBridge } from '../integrations/supabase-runtime-store.js';
 import { shouldShareRegistrationLink, registrationLinkAction } from '../policies/registration-link-policy.js';
 import { shouldRequestHumanHandoff } from '../policies/handoff-policy.js';
 import { detectDestination, resolveOfferByDestination } from '../resolvers/offer-resolver.js';
@@ -81,12 +81,12 @@ function buildBrowseReply(name: string | null, offers: RuntimeOffer[]): string {
     return `${greetName(name)}כרגע אין לי הצעות פעילות שאני יכולה להציג בצורה בטוחה. אם תרצה, אעביר אותך לנציג כדי לבדוק מה צפוי להיפתח.`;
   }
 
-  const lines = offers.map((offer, index) => {
+  const lines = offers.slice(0, 4).map((offer, index) => {
     const pricePart = offer.price ? ` — החל מ-${offer.price}${offer.currency ?? '₪'}` : '';
     return `${index + 1}. ${offer.title}${pricePart}`;
   });
 
-  return `${greetName(name)}כרגע אלה הטיולים הפעילים שאני יכולה להציע:
+  return `${greetName(name)}כרגע אלה כמה מהטיולים הפעילים שאני יכולה להציע:
 ${lines.join('\n')}
 
 אם אחד מהם מושך אותך, אני אגיד לך ישר מה הכי מתאים ואשלח לינק להרשמה.`;
@@ -136,6 +136,91 @@ function buildWritebacks(mode: string, leadState: LeadState, offer: RuntimeOffer
   ];
 }
 
+function buildObjective(mode: string, offer: RuntimeOffer | null): { primary_goal: string; secondary_goal: string } {
+  if (mode === 'browse') {
+    return {
+      primary_goal: 'Present active trips naturally and help the user focus on one relevant option.',
+      secondary_goal: 'Keep momentum and ask at most one useful follow-up question.',
+    };
+  }
+
+  if (mode === 'offer') {
+    return {
+      primary_goal: `Confirm and sell the specific trip${offer ? `: ${offer.title}` : ''}.`,
+      secondary_goal: 'Build confidence and move the user toward details or registration.',
+    };
+  }
+
+  if (mode === 'price') {
+    return {
+      primary_goal: 'Answer the pricing question directly and honestly.',
+      secondary_goal: 'Keep the user moving forward without unnecessary qualification.',
+    };
+  }
+
+  if (mode === 'handoff') {
+    return {
+      primary_goal: 'Acknowledge the handoff calmly and honestly.',
+      secondary_goal: 'Do not overpromise beyond what the runtime already decided.',
+    };
+  }
+
+  return {
+    primary_goal: 'Help the user move toward a relevant trip choice.',
+    secondary_goal: 'Sound natural and useful, not scripted.',
+  };
+}
+
+function buildHardRules(mode: string, offer: RuntimeOffer | null, allowLink: boolean): string[] {
+  const rules = [
+    'Never invent facts.',
+    'Never invent a price.',
+    'If the exact price is unknown, say so clearly.',
+    'Ask at most one question.',
+    'Keep the reply short unless the user explicitly asked for detail.',
+    'Use natural Hebrew and avoid robotic phrasing.',
+    'Be warm, direct, and sales-useful.',
+  ];
+
+  if (mode !== 'handoff') {
+    rules.push('Do not say you are transferring to a human right now.');
+  }
+
+  if (!allowLink) {
+    rules.push('Do not include any registration or details link in this reply.');
+  }
+
+  if (mode === 'price' && !offer?.price) {
+    rules.push('State clearly that there is no final published price available yet for this trip.');
+  }
+
+  return rules;
+}
+
+function buildMustInclude(mode: string, fallbackReply: string): string[] {
+  if (mode === 'handoff') {
+    return ['Acknowledge that a human follow-up is being handled.', 'Keep the wording calm and honest.'];
+  }
+
+  if (mode === 'price') {
+    return ['Answer the price question immediately in the first sentence if the price is known.'];
+  }
+
+  if (mode === 'browse') {
+    return ['Mention actual active trip options, not a generic non-answer.'];
+  }
+
+  return ['Stay consistent with the deterministic fallback reply intent.', fallbackReply];
+}
+
+function buildMustNotInclude(): string[] {
+  return [
+    'Do not invent unavailable destinations.',
+    'Do not compare unrelated trip prices unless explicitly provided in facts.',
+    'Do not sound like a customer support robot.',
+  ];
+}
+
 export async function runTamarTurnEngine(input: TamarTurnRequest): Promise<TamarTurnResponse> {
   const bridgeContext = await fetchLeadContextByPhone(input.phone);
 
@@ -171,25 +256,50 @@ export async function runTamarTurnEngine(input: TamarTurnRequest): Promise<Tamar
   const offer = detected.offer;
   const destination = detected.destination;
 
-  let replyText: string;
+  let fallbackReply: string;
   if (mode === 'browse') {
-    replyText = buildBrowseReply(leadState.firstName, offers);
+    fallbackReply = buildBrowseReply(leadState.firstName, offers);
   } else if (mode === 'handoff') {
-    replyText = `${greetName(leadState.firstName)}מעולה — אני מעבירה אותך לנציג אנושי מהצוות כדי לעזור לך לסגור את זה.`;
+    fallbackReply = `${greetName(leadState.firstName)}מעולה — אני מעבירה אותך לנציג אנושי מהצוות כדי לעזור לך לסגור את זה.`;
   } else if (mode === 'price') {
-    replyText = buildPriceReply(leadState.firstName, offer);
+    fallbackReply = buildPriceReply(leadState.firstName, offer);
   } else if (mode === 'offer' && offer) {
-    replyText = buildOfferReply(leadState.firstName, offer);
+    fallbackReply = buildOfferReply(leadState.firstName, offer);
   } else {
-    replyText = buildGenericReply(leadState.firstName, leadState, offers);
+    fallbackReply = buildGenericReply(leadState.firstName, leadState, offers);
   }
 
   const actions = shouldShareRegistrationLink(mode, offer)
     ? [registrationLinkAction(offer as RuntimeOffer)]
     : [];
 
+  const llmReply = await generateReplyViaBridge({
+    identity: {
+      name: 'תמר',
+      language: 'he',
+      tone: 'warm_natural_direct',
+      sales_intensity: 'medium',
+      emoji_policy: 'few',
+      verbosity: 'short',
+      gender_sensitive_hebrew: true,
+    },
+    turn_context: {
+      user_message: input.messageText,
+      mode,
+      contact_first_name: leadState.firstName,
+      resolved_offer: offer,
+      active_offers: offers.slice(0, 6),
+      recent_interactions: bridgeContext.recentInteractions.slice(-6),
+    },
+    objective: buildObjective(mode, offer),
+    hard_rules: buildHardRules(mode, offer, actions.length > 0),
+    must_include: buildMustInclude(mode, fallbackReply),
+    must_not_include: buildMustNotInclude(),
+    fallback_reply: fallbackReply,
+  });
+
   return {
-    replyText,
+    replyText: llmReply.replyText,
     mode,
     reasons,
     resolvedOfferId: offer?.id ?? null,
@@ -214,6 +324,9 @@ export async function runTamarTurnEngine(input: TamarTurnRequest): Promise<Tamar
       actions,
       bridgeRuntimeFlags: bridgeContext.runtimeFlags,
       bridgeRecentInteractionsCount: bridgeContext.recentInteractions.length,
+      fallbackReply,
+      llmReplyUsedFallback: llmReply.usedFallback,
+      llmReplyRaw: llmReply.raw,
     },
     version: versionInfo(),
   };
