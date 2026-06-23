@@ -23,21 +23,23 @@ export async function metaWebhookRoute(app) {
                 to: inbound.phone,
                 text: result.replyText,
             });
-            if (process.env.RUNTIME_WRITEBACKS_TO_SUPABASE === 'true') {
-                await persistRuntimeWritebacks({
-                    phone: inbound.phone,
-                    messageText: inbound.messageText,
-                    replyText: result.replyText,
-                    mode: result.mode,
-                    resolvedOfferId: result.resolvedOfferId,
-                    writebacks: result.writebacks,
-                    trace: {
-                        ...result.trace,
-                        meta_delivery_response: sendResult,
-                        meta_message_id: inbound.messageId,
-                    },
-                });
-            }
+            await persistRuntimeWritebacks({
+                phone: inbound.phone,
+                contactId: result.trace && typeof result.trace === 'object' && typeof result.trace.runtimeLead === 'object' && result.trace.runtimeLead !== null && 'contactId' in result.trace.runtimeLead
+                    ? (result.trace.runtimeLead.contactId ?? null)
+                    : null,
+                messageId: inbound.messageId,
+                messageText: inbound.messageText,
+                replyText: result.replyText,
+                mode: result.mode,
+                resolvedOfferId: result.resolvedOfferId,
+                writebacks: result.writebacks,
+                trace: {
+                    ...result.trace,
+                    meta_delivery_response: sendResult,
+                    meta_message_id: inbound.messageId,
+                },
+            });
             processed.push({
                 phone: inbound.phone,
                 messageId: inbound.messageId,

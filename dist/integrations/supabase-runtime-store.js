@@ -1,101 +1,189 @@
-import { getSupabaseAdmin } from './supabase-admin.js';
-function mapOffer(row) {
+function getBridgeConfig() {
+    const baseUrl = process.env.LOVABLE_API_URL;
+    const token = process.env.RUNTIME_BRIDGE_TOKEN;
+    if (!baseUrl)
+        throw new Error('Missing LOVABLE_API_URL');
+    if (!token)
+        throw new Error('Missing RUNTIME_BRIDGE_TOKEN');
     return {
-        id: String(row.id),
-        title: String(row.title ?? row.name ?? 'Untitled offer'),
-        destination: typeof row.destination === 'string' ? row.destination : null,
-        status: typeof row.status === 'string' ? row.status : null,
-        price: typeof row.price === 'number'
-            ? row.price
-            : typeof row.base_price_per_person === 'number'
-                ? row.base_price_per_person
-                : null,
-        currency: typeof row.currency === 'string' ? row.currency : '₪',
-        offerUrl: typeof row.offer_url === 'string' ? row.offer_url : null,
-        aiSummary: typeof row.ai_summary === 'string' ? row.ai_summary : null,
+        baseUrl: baseUrl.replace(/\/$/, ''),
+        token,
     };
 }
-export async function fetchActiveOffersFromSupabase() {
-    const supabase = getSupabaseAdmin();
-    const { data, error } = await supabase
-        .from('offers')
-        .select('id,title,destination,status,price,base_price_per_person,currency,offer_url,ai_summary')
-        .eq('status', 'active')
-        .order('created_at', { ascending: false });
-    if (error)
-        throw error;
-    return (data ?? []).map((row) => mapOffer(row));
+async function bridgeFetch(path, init) {
+    const { baseUrl, token } = getBridgeConfig();
+    const response = await fetch(`${baseUrl}${path}`, {
+        ...init,
+        headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+            ...(init?.headers ?? {}),
+        },
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+        throw new Error(`Lovable bridge failed: ${response.status} ${JSON.stringify(payload)}`);
+    }
+    return payload;
 }
-export async function fetchLeadByPhoneFromSupabase(phone) {
-    const supabase = getSupabaseAdmin();
-    const { data, error } = await supabase
-        .from('contacts')
-        .select('id,phone,whatsapp_number,first_name,name,preferred_destination,preferred_time_window,travel_companion_state,current_offer_id,lead_stage')
-        .or(`phone.eq.${phone},whatsapp_number.eq.${phone}`)
-        .maybeSingle();
-    if (error)
-        throw error;
-    if (!data)
+function asRecord(value) {
+    return typeof value === 'object' && value !== null ? value : {};
+}
+function asString(value) {
+    if (typeof value !== 'string')
         return null;
-    const row = data;
+    const trimmed = value.trim();
+    return trimmed.length ? trimmed : null;
+}
+function asNumber(value) {
+    if (typeof value === 'number' && Number.isFinite(value))
+        return value;
+    if (typeof value === 'string') {
+        const normalized = value.replace(/[, ]/g, '');
+        const parsed = Number(normalized);
+        return Number.isFinite(parsed) ? parsed : null;
+    }
+    return null;
+}
+function asStringArray(value) {
+    if (!Array.isArray(value))
+        return [];
+    return value.filter((item) => typeof item === 'string').map((item) => item.trim()).filter(Boolean);
+}
+function normalizeOffer(raw) {
+    const record = asRecord(raw);
+    const id = asString(record.id) ?? asString(record.offer_id);
+    const title = asString(record.title) ?? asString(record.offer_title) ?? asString(record.name);
+    if (!id || !title)
+        return null;
     return {
-        contactId: String(row.id),
-        phone: String(row.phone ?? row.whatsapp_number ?? phone),
-        firstName: typeof row.first_name === 'string'
-            ? row.first_name
-            : typeof row.name === 'string'
-                ? row.name
-                : null,
-        preferredDestination: typeof row.preferred_destination === 'string' ? row.preferred_destination : null,
-        preferredTimeWindow: typeof row.preferred_time_window === 'string' ? row.preferred_time_window : null,
-        travelCompanionState: typeof row.travel_companion_state === 'string' ? row.travel_companion_state : null,
-        currentOfferId: typeof row.current_offer_id === 'string' ? row.current_offer_id : null,
-        leadStage: typeof row.lead_stage === 'string' ? row.lead_stage : null,
+        id,
+        title,
+        destination: asString(record.destination),
+        status: asString(record.status),
+        price: asNumber(record.price) ?? asNumber(record.base_price_per_person),
+        currency: asString(record.currency) ?? '₪',
+        offerUrl: asString(record.offer_url) ?? asString(record.offerUrl) ?? asString(record.url),
+        aiSummary: asString(record.ai_summary) ?? asString(record.aiSummary),
+        meta: {
+            description: asString(record.description),
+            salesAngle: asString(record.sales_angle) ?? asString(record.salesAngle),
+            targetMinAge: asNumber(record.target_min_age),
+            targetMaxAge: asNumber(record.target_max_age),
+            targetInterests: asStringArray(record.target_interests),
+            targetSpendingProfile: asString(record.target_spending_profile),
+            eventEndDate: asString(record.event_end_date),
+            flightsIncluded: typeof record.flights_included === 'boolean' ? record.flights_included : null,
+            qualifierHints: asRecord(record.qualifier_hints),
+            matchingTags: asStringArray(record.matching_tags),
+        },
     };
+}
+function normalizeLead(raw, fallbackPhone) {
+    const record = asRecord(raw);
+    return {
+        contactId: asString(record.id) ?? asString(record.contact_id),
+        phone: asString(record.phone) ?? asString(record.whatsapp_number) ?? fallbackPhone,
+        firstName: asString(record.first_name) ?? asString(record.firstName) ?? asString(record.name),
+        preferredDestination: asString(record.preferred_destination) ?? asString(record.preferredDestination),
+        preferredTimeWindow: asString(record.preferred_time_window) ?? asString(record.preferredTimeWindow),
+        travelCompanionState: asString(record.travel_companion_state) ?? asString(record.travelCompanionState),
+        currentOfferId: asString(record.current_offer_id) ?? asString(record.currentOfferId),
+        leadStage: asString(record.lead_stage) ?? asString(record.intake_stage) ?? asString(record.leadStage),
+    };
+}
+function normalizeLastPresentedOffers(raw) {
+    if (!Array.isArray(raw))
+        return [];
+    const result = [];
+    for (const item of raw) {
+        const record = asRecord(item);
+        const index = asNumber(record.index);
+        const offerId = asString(record.offer_id) ?? asString(record.offerId);
+        if (!index || !offerId)
+            continue;
+        result.push({
+            index,
+            offerId,
+            title: asString(record.title) ?? null,
+        });
+    }
+    return result;
+}
+export async function fetchLeadContextByPhone(phone) {
+    const payload = await bridgeFetch('/api/public/runtime/lead-context', {
+        method: 'POST',
+        body: JSON.stringify({ phone }),
+    });
+    const recentInteractionsRaw = Array.isArray(payload.recent_interactions)
+        ? payload.recent_interactions
+        : Array.isArray(payload.recentInteractions)
+            ? payload.recentInteractions
+            : [];
+    const activeOffersRaw = Array.isArray(payload.active_offers)
+        ? payload.active_offers
+        : Array.isArray(payload.activeOffers)
+            ? payload.activeOffers
+            : [];
+    const conversationMemory = asRecord(payload.conversation_memory ?? payload.conversationMemory);
+    return {
+        contact: normalizeLead(payload.contact, phone),
+        recentInteractions: recentInteractionsRaw.map((item) => asRecord(item)),
+        activeOffers: activeOffersRaw.map(normalizeOffer).filter((offer) => Boolean(offer)),
+        runtimeFlags: asRecord(payload.runtime_flags ?? payload.runtimeFlags),
+        conversationMemory: {
+            lastPresentedOffers: normalizeLastPresentedOffers(conversationMemory.last_presented_offers),
+            lastPresentedAt: asString(conversationMemory.last_presented_offers_at),
+        },
+    };
+}
+export async function generateReplyViaBridge(payload) {
+    const result = await bridgeFetch('/api/public/runtime/generate-reply', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+    });
+    const replyText = asString(result.reply_text) ?? payload.fallback_reply;
+    const usedFallback = Boolean(result.used_fallback) || replyText === payload.fallback_reply;
+    return { replyText, usedFallback, raw: result };
+}
+export async function persistHandoffRequest(params) {
+    return bridgeFetch('/api/public/runtime/handoff', {
+        method: 'POST',
+        body: JSON.stringify({
+            phone: params.phone,
+            contact_id: params.contactId ?? null,
+            reason: params.reason,
+            latest_inbound_message: params.latestInboundMessage,
+            latest_outbound_message: params.latestOutboundMessage,
+            resolved_offer_id: params.resolvedOfferId ?? null,
+            trace: params.runtimeTrace,
+        }),
+    });
 }
 export async function persistRuntimeWritebacks(params) {
-    const supabase = getSupabaseAdmin();
-    const interactionPayload = {
-        contact_id: params.contactId ?? null,
-        type: 'whatsapp_ai_turn',
-        source: 'zooga_trip_sales_brain',
-        content: JSON.stringify({
-            inbound: params.messageText,
-            outbound: params.replyText,
+    const leadWriteback = params.writebacks.find((item) => item.type === 'lead_state_upsert') ?? {};
+    const presentedOffers = params.writebacks.find((item) => item.type === 'last_presented_offers_memory');
+    await bridgeFetch('/api/public/runtime/writeback', {
+        method: 'POST',
+        body: JSON.stringify({
+            phone: params.phone,
+            contact_id: params.contactId ?? null,
+            message_id: params.messageId ?? null,
+            inbound_text: params.messageText,
+            outbound_text: params.replyText,
             mode: params.mode,
             resolved_offer_id: params.resolvedOfferId ?? null,
+            lead_updates: {
+                preferred_destination: leadWriteback.preferredDestination ?? null,
+                preferred_time_window: leadWriteback.preferredTimeWindow ?? null,
+                travel_companion_state: leadWriteback.travelCompanionState ?? null,
+                current_offer_id: leadWriteback.currentOfferId ?? null,
+                lead_stage: leadWriteback.leadStage ?? null,
+            },
+            last_presented_offers: Array.isArray(presentedOffers?.items)
+                ? presentedOffers.items
+                : undefined,
+            trace: params.trace,
         }),
-        related_offer_id: params.resolvedOfferId ?? null,
-        timestamp: new Date().toISOString(),
-    };
-    const { error: interactionError } = await supabase.from('interactions').insert(interactionPayload);
-    if (interactionError)
-        throw interactionError;
-    const leadWriteback = params.writebacks.find((item) => item.type === 'lead_state_upsert');
-    if (leadWriteback && params.contactId) {
-        const patch = {};
-        if (typeof leadWriteback.preferredDestination === 'string')
-            patch.preferred_destination = leadWriteback.preferredDestination;
-        if (typeof leadWriteback.preferredTimeWindow === 'string')
-            patch.preferred_time_window = leadWriteback.preferredTimeWindow;
-        if (typeof leadWriteback.travelCompanionState === 'string')
-            patch.travel_companion_state = leadWriteback.travelCompanionState;
-        if (typeof leadWriteback.currentOfferId === 'string')
-            patch.current_offer_id = leadWriteback.currentOfferId;
-        if (typeof leadWriteback.leadStage === 'string')
-            patch.lead_stage = leadWriteback.leadStage;
-        if (Object.keys(patch).length) {
-            const { error: contactError } = await supabase.from('contacts').update(patch).eq('id', params.contactId);
-            if (contactError)
-                throw contactError;
-        }
-    }
-    const tracePayload = {
-        source: 'zooga_trip_sales_brain',
-        status: 'runtime_trace',
-        payload: params.trace,
-    };
-    const { error: traceError } = await supabase.from('webhook_logs').insert(tracePayload);
-    if (traceError)
-        throw traceError;
+    });
 }

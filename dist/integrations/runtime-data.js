@@ -17,6 +17,11 @@ function asNumber(value) {
     }
     return null;
 }
+function asStringArray(value) {
+    if (!Array.isArray(value))
+        return [];
+    return value.filter((item) => typeof item === 'string').map((item) => item.trim()).filter(Boolean);
+}
 function normalizeOffer(raw) {
     const record = asRecord(raw);
     const id = asString(record.id) ?? asString(record.offer_id);
@@ -32,6 +37,18 @@ function normalizeOffer(raw) {
         currency: asString(record.currency) ?? '₪',
         offerUrl: asString(record.offer_url) ?? asString(record.offerUrl) ?? asString(record.url),
         aiSummary: asString(record.ai_summary) ?? asString(record.aiSummary),
+        meta: {
+            description: asString(record.description),
+            salesAngle: asString(record.sales_angle) ?? asString(record.salesAngle),
+            targetMinAge: asNumber(record.target_min_age),
+            targetMaxAge: asNumber(record.target_max_age),
+            targetInterests: asStringArray(record.target_interests),
+            targetSpendingProfile: asString(record.target_spending_profile),
+            eventEndDate: asString(record.event_end_date),
+            flightsIncluded: typeof record.flights_included === 'boolean' ? record.flights_included : null,
+            qualifierHints: asRecord(record.qualifier_hints),
+            matchingTags: asStringArray(record.matching_tags),
+        },
     };
 }
 export function loadRuntimeOffers(input) {

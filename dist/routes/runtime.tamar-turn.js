@@ -13,18 +13,17 @@ export async function tamarTurnRoute(app) {
             };
         }
         const result = await runTamarTurnEngine(parsed.data);
-        if (process.env.RUNTIME_WRITEBACKS_TO_SUPABASE === 'true') {
-            await persistRuntimeWritebacks({
-                phone: parsed.data.phone,
-                contactId: parsed.data.contactId ?? null,
-                messageText: parsed.data.messageText,
-                replyText: result.replyText,
-                mode: result.mode,
-                resolvedOfferId: result.resolvedOfferId,
-                writebacks: result.writebacks,
-                trace: result.trace,
-            });
-        }
+        await persistRuntimeWritebacks({
+            phone: parsed.data.phone,
+            contactId: parsed.data.contactId ?? null,
+            messageId: parsed.data.messageId,
+            messageText: parsed.data.messageText,
+            replyText: result.replyText,
+            mode: result.mode,
+            resolvedOfferId: result.resolvedOfferId,
+            writebacks: result.writebacks,
+            trace: result.trace,
+        });
         return {
             ok: true,
             result,
