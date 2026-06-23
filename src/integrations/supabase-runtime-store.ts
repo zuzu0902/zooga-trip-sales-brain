@@ -19,6 +19,24 @@ function mapOffer(row: Record<string, unknown>): RuntimeOffer {
   };
 }
 
+function mapLead(row: Record<string, unknown>, fallbackPhone: string): RuntimeLead {
+  return {
+    contactId: String(row.id),
+    phone: String(row.phone ?? row.whatsapp_number ?? fallbackPhone),
+    firstName:
+      typeof row.first_name === 'string'
+        ? row.first_name
+        : typeof row.name === 'string'
+          ? row.name
+          : null,
+    preferredDestination: typeof row.preferred_destination === 'string' ? row.preferred_destination : null,
+    preferredTimeWindow: typeof row.preferred_time_window === 'string' ? row.preferred_time_window : null,
+    travelCompanionState: typeof row.travel_companion_state === 'string' ? row.travel_companion_state : null,
+    currentOfferId: typeof row.current_offer_id === 'string' ? row.current_offer_id : null,
+    leadStage: typeof row.lead_stage === 'string' ? row.lead_stage : null,
+  };
+}
+
 export async function fetchActiveOffersFromSupabase(): Promise<RuntimeOffer[]> {
   const supabase: any = getSupabaseAdmin();
   const { data, error } = await supabase
@@ -42,23 +60,108 @@ export async function fetchLeadByPhoneFromSupabase(phone: string): Promise<Runti
   if (error) throw error;
   if (!data) return null;
 
-  const row = data as Record<string, unknown>;
+  return mapLead(data as Record<string, unknown>, phone);
+}
 
-  return {
-    contactId: String(row.id),
-    phone: String(row.phone ?? row.whatsapp_number ?? phone),
-    firstName:
-      typeof row.first_name === 'string'
-        ? row.first_name
-        : typeof row.name === 'string'
-          ? row.name
-          : null,
-    preferredDestination: typeof row.preferred_destination === 'string' ? row.preferred_destination : null,
-    preferredTimeWindow: typeof row.preferred_time_window === 'string' ? row.preferred_time_window : null,
-    travelCompanionState: typeof row.travel_companion_state === 'string' ? row.travel_companion_state : null,
-    currentOfferId: typeof row.current_offer_id === 'string' ? row.current_offer_id : null,
-    leadStage: typeof row.lead_stage === 'string' ? row.lead_stage : null,
+export async function ensureContactByPhone(params: { phone: string; firstName?: string | null }): Promise<RuntimeLead> {
+  const existing = await fetchLeadByPhoneFromSupabase(params.phone);
+  if (existing) return existing;
+
+  const supabase: any = getSupabaseAdmin();
+  const insertPayload: Record<string, unknown> = {
+    phone: params.phone,
+    whatsapp_number: params.phone,
+    source: 'whatsapp_runtime',
+    lead_stage: 'new_lead',
+    status: 'new_lead',
   };
+
+  if (params.firstName) {
+    insertPayload.first_name = params.firstName;
+    insertPayload.name = params.firstName;
+  }
+
+  const { data, error } = await supabase
+    .from('contacts')
+    .insert(insertPayload)
+    .select('id,phone,whatsapp_number,first_name,name,preferred_destination,preferred_time_window,travel_companion_state,current_offer_id,lead_stage')
+    .single();
+
+  if (error) throw error;
+  return mapLead(data as Record<string, unknown>, params.phone);
+}
+
+export async function hasProcessedMetaMessage(messageId: string): Promise<boolean> {
+  const supabase: any = getSupabaseAdmin();
+  const { data, error } = await supabase
+    .from('webhook_logs')
+    .select('id')
+    .eq('source', 'meta_whatsapp_inbound')
+    .eq('status', 'processed')
+    .contains('payload', { meta_message_id: messageId })
+    .limit(1);
+
+  if (error) throw error;
+  return Array.isArray(data) && data.length > 0;
+}
+
+export async function recordInboundMetaWebhook(params: {
+  messageId: string;
+  phone: string;
+  payload: Record<string, unknown>;
+  status?: 'received' | 'processed' | 'skipped_duplicate' | 'failed';
+}) {
+  const supabase: any = getSupabaseAdmin();
+  const { error } = await supabase.from('webhook_logs').insert({
+    source: 'meta_whatsapp_inbound',
+    status: params.status ?? 'received',
+    payload: {
+      meta_message_id: params.messageId,
+      phone: params.phone,
+      ...params.payload,
+    },
+  });
+
+  if (error) throw error;
+}
+
+export async function persistHandoffRequest(params: {
+  contactId: string | null;
+  phone: string;
+  latestInboundMessage: string;
+  runtimeTrace: Record<string, unknown>;
+}) {
+  const supabase: any = getSupabaseAdmin();
+
+  const payload = {
+    contact_id: params.contactId,
+    source: 'zooga_trip_sales_brain',
+    status: 'requested',
+    payload: {
+      phone: params.phone,
+      latest_inbound_message: params.latestInboundMessage,
+      runtime_trace: params.runtimeTrace,
+    },
+  };
+
+  const candidateTables = ['manager_handoffs', 'handoffs'];
+  let lastError: unknown = null;
+
+  for (const table of candidateTables) {
+    const { error } = await supabase.from(table).insert(payload);
+    if (!error) return;
+    lastError = error;
+  }
+
+  await supabase.from('webhook_logs').insert({
+    source: 'zooga_trip_sales_brain',
+    status: 'handoff_requested',
+    payload,
+  });
+
+  if (lastError) {
+    return;
+  }
 }
 
 export async function persistRuntimeWritebacks(params: {
@@ -103,6 +206,15 @@ export async function persistRuntimeWritebacks(params: {
       const { error: contactError } = await supabase.from('contacts').update(patch).eq('id', params.contactId);
       if (contactError) throw contactError;
     }
+  }
+
+  if (params.mode === 'handoff') {
+    await persistHandoffRequest({
+      contactId: params.contactId ?? null,
+      phone: params.phone,
+      latestInboundMessage: params.messageText,
+      runtimeTrace: params.trace,
+    });
   }
 
   const tracePayload = {
