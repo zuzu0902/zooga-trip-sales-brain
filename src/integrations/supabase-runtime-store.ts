@@ -1,172 +1,185 @@
 import type { RuntimeLead, RuntimeOffer } from './runtime-data.js';
-import { getSupabaseAdmin } from './supabase-admin.js';
 
-function mapOffer(row: Record<string, unknown>): RuntimeOffer {
+function getBridgeConfig() {
+  const baseUrl = process.env.LOVABLE_API_URL;
+  const token = process.env.RUNTIME_BRIDGE_TOKEN;
+
+  if (!baseUrl) {
+    throw new Error('Missing LOVABLE_API_URL');
+  }
+
+  if (!token) {
+    throw new Error('Missing RUNTIME_BRIDGE_TOKEN');
+  }
+
   return {
-    id: String(row.id),
-    title: String(row.title ?? row.name ?? 'Untitled offer'),
-    destination: typeof row.destination === 'string' ? row.destination : null,
-    status: typeof row.status === 'string' ? row.status : null,
-    price:
-      typeof row.price === 'number'
-        ? row.price
-        : typeof row.base_price_per_person === 'number'
-          ? row.base_price_per_person
-          : null,
-    currency: typeof row.currency === 'string' ? row.currency : '₪',
-    offerUrl: typeof row.offer_url === 'string' ? row.offer_url : null,
-    aiSummary: typeof row.ai_summary === 'string' ? row.ai_summary : null,
+    baseUrl: baseUrl.replace(/\/$/, ''),
+    token,
   };
 }
 
-function mapLead(row: Record<string, unknown>, fallbackPhone: string): RuntimeLead {
+async function bridgeFetch(path: string, init?: RequestInit) {
+  const { baseUrl, token } = getBridgeConfig();
+
+  const response = await fetch(`${baseUrl}${path}`, {
+    ...init,
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+      ...(init?.headers ?? {}),
+    },
+  });
+
+  const payload = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    throw new Error(`Lovable bridge failed: ${response.status} ${JSON.stringify(payload)}`);
+  }
+
+  return payload as Record<string, unknown>;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {};
+}
+
+function asString(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed.length ? trimmed : null;
+}
+
+function asNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    const normalized = value.replace(/[, ]/g, '');
+    const parsed = Number(normalized);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function normalizeOffer(raw: unknown): RuntimeOffer | null {
+  const record = asRecord(raw);
+  const id = asString(record.id) ?? asString(record.offer_id);
+  const title = asString(record.title) ?? asString(record.offer_title) ?? asString(record.name);
+
+  if (!id || !title) return null;
+
   return {
-    contactId: String(row.id),
-    phone: String(row.phone ?? row.whatsapp_number ?? fallbackPhone),
-    firstName:
-      typeof row.first_name === 'string'
-        ? row.first_name
-        : typeof row.name === 'string'
-          ? row.name
-          : null,
-    preferredDestination: typeof row.preferred_destination === 'string' ? row.preferred_destination : null,
-    preferredTimeWindow: typeof row.preferred_time_window === 'string' ? row.preferred_time_window : null,
-    travelCompanionState: typeof row.travel_companion_state === 'string' ? row.travel_companion_state : null,
-    currentOfferId: typeof row.current_offer_id === 'string' ? row.current_offer_id : null,
-    leadStage: typeof row.lead_stage === 'string' ? row.lead_stage : null,
+    id,
+    title,
+    destination: asString(record.destination),
+    status: asString(record.status),
+    price: asNumber(record.price) ?? asNumber(record.base_price_per_person),
+    currency: asString(record.currency) ?? '₪',
+    offerUrl: asString(record.offer_url) ?? asString(record.offerUrl) ?? asString(record.url),
+    aiSummary: asString(record.ai_summary) ?? asString(record.aiSummary),
+  };
+}
+
+function normalizeLead(raw: unknown, fallbackPhone: string): RuntimeLead {
+  const record = asRecord(raw);
+
+  return {
+    contactId: asString(record.id) ?? asString(record.contact_id),
+    phone: asString(record.phone) ?? asString(record.whatsapp_number) ?? fallbackPhone,
+    firstName: asString(record.first_name) ?? asString(record.firstName) ?? asString(record.name),
+    preferredDestination: asString(record.preferred_destination) ?? asString(record.preferredDestination),
+    preferredTimeWindow: asString(record.preferred_time_window) ?? asString(record.preferredTimeWindow),
+    travelCompanionState: asString(record.travel_companion_state) ?? asString(record.travelCompanionState),
+    currentOfferId: asString(record.current_offer_id) ?? asString(record.currentOfferId),
+    leadStage: asString(record.lead_stage) ?? asString(record.intake_stage) ?? asString(record.leadStage),
+  };
+}
+
+export async function fetchLeadContextByPhone(phone: string): Promise<{
+  contact: RuntimeLead;
+  recentInteractions: Array<Record<string, unknown>>;
+  activeOffers: RuntimeOffer[];
+  runtimeFlags: Record<string, unknown>;
+}> {
+  const payload = await bridgeFetch('/api/public/runtime/lead-context', {
+    method: 'POST',
+    body: JSON.stringify({ phone }),
+  });
+
+  const recentInteractionsRaw = Array.isArray(payload.recent_interactions)
+    ? payload.recent_interactions
+    : Array.isArray(payload.recentInteractions)
+      ? payload.recentInteractions
+      : [];
+  const activeOffersRaw = Array.isArray(payload.active_offers)
+    ? payload.active_offers
+    : Array.isArray(payload.activeOffers)
+      ? payload.activeOffers
+      : [];
+
+  return {
+    contact: normalizeLead(payload.contact, phone),
+    recentInteractions: recentInteractionsRaw.map((item) => asRecord(item)),
+    activeOffers: activeOffersRaw.map(normalizeOffer).filter((offer): offer is RuntimeOffer => Boolean(offer)),
+    runtimeFlags: asRecord(payload.runtime_flags ?? payload.runtimeFlags),
   };
 }
 
 export async function fetchActiveOffersFromSupabase(): Promise<RuntimeOffer[]> {
-  const supabase: any = getSupabaseAdmin();
-  const { data, error } = await supabase
-    .from('offers')
-    .select('id,title,destination,status,price,base_price_per_person,currency,offer_url,ai_summary')
-    .eq('status', 'active')
-    .order('created_at', { ascending: false });
-
-  if (error) throw error;
-  return (data ?? []).map((row: Record<string, unknown>) => mapOffer(row));
+  throw new Error('Direct offer fetch is disabled. Use fetchLeadContextByPhone via Lovable bridge.');
 }
 
 export async function fetchLeadByPhoneFromSupabase(phone: string): Promise<RuntimeLead | null> {
-  const supabase: any = getSupabaseAdmin();
-  const { data, error } = await supabase
-    .from('contacts')
-    .select('id,phone,whatsapp_number,first_name,name,preferred_destination,preferred_time_window,travel_companion_state,current_offer_id,lead_stage')
-    .or(`phone.eq.${phone},whatsapp_number.eq.${phone}`)
-    .maybeSingle();
-
-  if (error) throw error;
-  if (!data) return null;
-
-  return mapLead(data as Record<string, unknown>, phone);
+  const context = await fetchLeadContextByPhone(phone);
+  return context.contact;
 }
 
 export async function ensureContactByPhone(params: { phone: string; firstName?: string | null }): Promise<RuntimeLead> {
-  const existing = await fetchLeadByPhoneFromSupabase(params.phone);
-  if (existing) return existing;
-
-  const supabase: any = getSupabaseAdmin();
-  const insertPayload: Record<string, unknown> = {
-    phone: params.phone,
-    whatsapp_number: params.phone,
-    source: 'whatsapp_runtime',
-    lead_stage: 'new_lead',
-    status: 'new_lead',
+  const context = await fetchLeadContextByPhone(params.phone);
+  return {
+    ...context.contact,
+    firstName: context.contact.firstName ?? params.firstName ?? null,
   };
-
-  if (params.firstName) {
-    insertPayload.first_name = params.firstName;
-    insertPayload.name = params.firstName;
-  }
-
-  const { data, error } = await supabase
-    .from('contacts')
-    .insert(insertPayload)
-    .select('id,phone,whatsapp_number,first_name,name,preferred_destination,preferred_time_window,travel_companion_state,current_offer_id,lead_stage')
-    .single();
-
-  if (error) throw error;
-  return mapLead(data as Record<string, unknown>, params.phone);
 }
 
-export async function hasProcessedMetaMessage(messageId: string): Promise<boolean> {
-  const supabase: any = getSupabaseAdmin();
-  const { data, error } = await supabase
-    .from('webhook_logs')
-    .select('id')
-    .eq('source', 'meta_whatsapp_inbound')
-    .eq('status', 'processed')
-    .contains('payload', { meta_message_id: messageId })
-    .limit(1);
-
-  if (error) throw error;
-  return Array.isArray(data) && data.length > 0;
+export async function hasProcessedMetaMessage(_messageId: string): Promise<boolean> {
+  return false;
 }
 
-export async function recordInboundMetaWebhook(params: {
+export async function recordInboundMetaWebhook(_params: {
   messageId: string;
   phone: string;
   payload: Record<string, unknown>;
   status?: 'received' | 'processed' | 'skipped_duplicate' | 'failed';
 }) {
-  const supabase: any = getSupabaseAdmin();
-  const { error } = await supabase.from('webhook_logs').insert({
-    source: 'meta_whatsapp_inbound',
-    status: params.status ?? 'received',
-    payload: {
-      meta_message_id: params.messageId,
-      phone: params.phone,
-      ...params.payload,
-    },
-  });
-
-  if (error) throw error;
+  return;
 }
 
 export async function persistHandoffRequest(params: {
   contactId: string | null;
   phone: string;
   latestInboundMessage: string;
+  latestOutboundMessage: string;
+  resolvedOfferId?: string | null;
+  reason: string;
   runtimeTrace: Record<string, unknown>;
 }) {
-  const supabase: any = getSupabaseAdmin();
-
-  const payload = {
-    contact_id: params.contactId,
-    source: 'zooga_trip_sales_brain',
-    status: 'requested',
-    payload: {
+  return bridgeFetch('/api/public/runtime/handoff', {
+    method: 'POST',
+    body: JSON.stringify({
       phone: params.phone,
+      contact_id: params.contactId ?? null,
+      reason: params.reason,
       latest_inbound_message: params.latestInboundMessage,
-      runtime_trace: params.runtimeTrace,
-    },
-  };
-
-  const candidateTables = ['manager_handoffs', 'handoffs'];
-  let lastError: unknown = null;
-
-  for (const table of candidateTables) {
-    const { error } = await supabase.from(table).insert(payload);
-    if (!error) return;
-    lastError = error;
-  }
-
-  await supabase.from('webhook_logs').insert({
-    source: 'zooga_trip_sales_brain',
-    status: 'handoff_requested',
-    payload,
+      latest_outbound_message: params.latestOutboundMessage,
+      resolved_offer_id: params.resolvedOfferId ?? null,
+      trace: params.runtimeTrace,
+    }),
   });
-
-  if (lastError) {
-    return;
-  }
 }
 
 export async function persistRuntimeWritebacks(params: {
   phone: string;
   contactId?: string | null;
+  messageId?: string | null;
   messageText: string;
   replyText: string;
   mode: string;
@@ -174,55 +187,38 @@ export async function persistRuntimeWritebacks(params: {
   writebacks: Array<Record<string, unknown>>;
   trace: Record<string, unknown>;
 }) {
-  const supabase: any = getSupabaseAdmin();
+  const leadWriteback = params.writebacks.find((item) => item.type === 'lead_state_upsert') ?? {};
 
-  const interactionPayload = {
-    contact_id: params.contactId ?? null,
-    type: 'whatsapp_ai_turn',
-    source: 'zooga_trip_sales_brain',
-    content: JSON.stringify({
-      inbound: params.messageText,
-      outbound: params.replyText,
+  await bridgeFetch('/api/public/runtime/writeback', {
+    method: 'POST',
+    body: JSON.stringify({
+      phone: params.phone,
+      contact_id: params.contactId ?? null,
+      message_id: params.messageId ?? null,
+      inbound_text: params.messageText,
+      outbound_text: params.replyText,
       mode: params.mode,
       resolved_offer_id: params.resolvedOfferId ?? null,
+      lead_updates: {
+        preferred_destination: (leadWriteback as Record<string, unknown>).preferredDestination ?? null,
+        preferred_time_window: (leadWriteback as Record<string, unknown>).preferredTimeWindow ?? null,
+        travel_companion_state: (leadWriteback as Record<string, unknown>).travelCompanionState ?? null,
+        current_offer_id: (leadWriteback as Record<string, unknown>).currentOfferId ?? null,
+        lead_stage: (leadWriteback as Record<string, unknown>).leadStage ?? null,
+      },
+      trace: params.trace,
     }),
-    related_offer_id: params.resolvedOfferId ?? null,
-    timestamp: new Date().toISOString(),
-  };
-
-  const { error: interactionError } = await supabase.from('interactions').insert(interactionPayload);
-  if (interactionError) throw interactionError;
-
-  const leadWriteback = params.writebacks.find((item) => item.type === 'lead_state_upsert');
-  if (leadWriteback && params.contactId) {
-    const patch: Record<string, unknown> = {};
-    if (typeof leadWriteback.preferredDestination === 'string') patch.preferred_destination = leadWriteback.preferredDestination;
-    if (typeof leadWriteback.preferredTimeWindow === 'string') patch.preferred_time_window = leadWriteback.preferredTimeWindow;
-    if (typeof leadWriteback.travelCompanionState === 'string') patch.travel_companion_state = leadWriteback.travelCompanionState;
-    if (typeof leadWriteback.currentOfferId === 'string') patch.current_offer_id = leadWriteback.currentOfferId;
-    if (typeof leadWriteback.leadStage === 'string') patch.lead_stage = leadWriteback.leadStage;
-
-    if (Object.keys(patch).length) {
-      const { error: contactError } = await supabase.from('contacts').update(patch).eq('id', params.contactId);
-      if (contactError) throw contactError;
-    }
-  }
+  });
 
   if (params.mode === 'handoff') {
     await persistHandoffRequest({
       contactId: params.contactId ?? null,
       phone: params.phone,
       latestInboundMessage: params.messageText,
+      latestOutboundMessage: params.replyText,
+      resolvedOfferId: params.resolvedOfferId ?? null,
+      reason: 'runtime_handoff',
       runtimeTrace: params.trace,
     });
   }
-
-  const tracePayload = {
-    source: 'zooga_trip_sales_brain',
-    status: 'runtime_trace',
-    payload: params.trace,
-  };
-
-  const { error: traceError } = await supabase.from('webhook_logs').insert(tracePayload);
-  if (traceError) throw traceError;
 }

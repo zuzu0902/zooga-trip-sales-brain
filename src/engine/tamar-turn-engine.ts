@@ -1,7 +1,7 @@
 import type { TamarTurnRequest, TamarTurnResponse } from '../types/tamar-turn.js';
 import { versionInfo } from '../version.js';
 import { loadRuntimeLead, loadRuntimeOffers, type RuntimeLead, type RuntimeOffer } from '../integrations/runtime-data.js';
-import { fetchActiveOffersFromSupabase, fetchLeadByPhoneFromSupabase } from '../integrations/supabase-runtime-store.js';
+import { fetchLeadContextByPhone } from '../integrations/supabase-runtime-store.js';
 import { shouldShareRegistrationLink, registrationLinkAction } from '../policies/registration-link-policy.js';
 import { shouldRequestHumanHandoff } from '../policies/handoff-policy.js';
 import { detectDestination, resolveOfferByDestination } from '../resolvers/offer-resolver.js';
@@ -137,16 +137,29 @@ function buildWritebacks(mode: string, leadState: LeadState, offer: RuntimeOffer
 }
 
 export async function runTamarTurnEngine(input: TamarTurnRequest): Promise<TamarTurnResponse> {
-  let offers = loadRuntimeOffers(input);
-  if (!offers.length && process.env.RUNTIME_LOAD_OFFERS_FROM_SUPABASE === 'true') {
-    offers = await fetchActiveOffersFromSupabase();
-  }
+  const bridgeContext = await fetchLeadContextByPhone(input.phone);
 
-  let runtimeLead = loadRuntimeLead(input);
-  if (!runtimeLead.contactId && process.env.RUNTIME_LOAD_LEAD_FROM_SUPABASE === 'true') {
-    const supabaseLead = await fetchLeadByPhoneFromSupabase(input.phone);
-    if (supabaseLead) runtimeLead = supabaseLead;
-  }
+  const offers = loadRuntimeOffers({
+    ...input,
+    offersSnapshot: input.offersSnapshot ?? bridgeContext.activeOffers,
+  });
+
+  const runtimeLead = loadRuntimeLead({
+    ...input,
+    contactId: input.contactId ?? bridgeContext.contact.contactId ?? undefined,
+    crmSnapshot: input.crmSnapshot ?? {
+      contact_id: bridgeContext.contact.contactId,
+      phone: bridgeContext.contact.phone,
+      first_name: bridgeContext.contact.firstName,
+      preferred_destination: bridgeContext.contact.preferredDestination,
+      preferred_time_window: bridgeContext.contact.preferredTimeWindow,
+      travel_companion_state: bridgeContext.contact.travelCompanionState,
+      current_offer_id: bridgeContext.contact.currentOfferId,
+      lead_stage: bridgeContext.contact.leadStage,
+    },
+    recentInteractions: input.recentInteractions ?? bridgeContext.recentInteractions,
+  });
+
   const leadState = extractLeadState(runtimeLead, input.messageText, offers);
   const handoffDecision = shouldRequestHumanHandoff(input.messageText);
   const detected = detectMode(input.messageText, offers);
@@ -199,6 +212,8 @@ export async function runTamarTurnEngine(input: TamarTurnRequest): Promise<Tamar
       activeOfferTitles: offers.map((item) => item.title),
       handoffDecision,
       actions,
+      bridgeRuntimeFlags: bridgeContext.runtimeFlags,
+      bridgeRecentInteractionsCount: bridgeContext.recentInteractions.length,
     },
     version: versionInfo(),
   };
