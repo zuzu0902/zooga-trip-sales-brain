@@ -1,16 +1,28 @@
 import type { RuntimeLead, RuntimeOffer } from './runtime-data.js';
 
+export type LastPresentedOffer = {
+  index: number;
+  offerId: string;
+  title?: string | null;
+};
+
+export type BridgeLeadContext = {
+  contact: RuntimeLead;
+  recentInteractions: Array<Record<string, unknown>>;
+  activeOffers: RuntimeOffer[];
+  runtimeFlags: Record<string, unknown>;
+  conversationMemory: {
+    lastPresentedOffers: LastPresentedOffer[];
+    lastPresentedAt: string | null;
+  };
+};
+
 function getBridgeConfig() {
   const baseUrl = process.env.LOVABLE_API_URL;
   const token = process.env.RUNTIME_BRIDGE_TOKEN;
 
-  if (!baseUrl) {
-    throw new Error('Missing LOVABLE_API_URL');
-  }
-
-  if (!token) {
-    throw new Error('Missing RUNTIME_BRIDGE_TOKEN');
-  }
+  if (!baseUrl) throw new Error('Missing LOVABLE_API_URL');
+  if (!token) throw new Error('Missing RUNTIME_BRIDGE_TOKEN');
 
   return {
     baseUrl: baseUrl.replace(/\/$/, ''),
@@ -31,7 +43,6 @@ async function bridgeFetch(path: string, init?: RequestInit) {
   });
 
   const payload = await response.json().catch(() => null);
-
   if (!response.ok) {
     throw new Error(`Lovable bridge failed: ${response.status} ${JSON.stringify(payload)}`);
   }
@@ -59,11 +70,15 @@ function asNumber(value: unknown): number | null {
   return null;
 }
 
+function asStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === 'string').map((item) => item.trim()).filter(Boolean);
+}
+
 function normalizeOffer(raw: unknown): RuntimeOffer | null {
   const record = asRecord(raw);
   const id = asString(record.id) ?? asString(record.offer_id);
   const title = asString(record.title) ?? asString(record.offer_title) ?? asString(record.name);
-
   if (!id || !title) return null;
 
   return {
@@ -75,12 +90,23 @@ function normalizeOffer(raw: unknown): RuntimeOffer | null {
     currency: asString(record.currency) ?? '₪',
     offerUrl: asString(record.offer_url) ?? asString(record.offerUrl) ?? asString(record.url),
     aiSummary: asString(record.ai_summary) ?? asString(record.aiSummary),
+    meta: {
+      description: asString(record.description),
+      salesAngle: asString(record.sales_angle) ?? asString(record.salesAngle),
+      targetMinAge: asNumber(record.target_min_age),
+      targetMaxAge: asNumber(record.target_max_age),
+      targetInterests: asStringArray(record.target_interests),
+      targetSpendingProfile: asString(record.target_spending_profile),
+      eventEndDate: asString(record.event_end_date),
+      flightsIncluded: typeof record.flights_included === 'boolean' ? record.flights_included : null,
+      qualifierHints: asRecord(record.qualifier_hints),
+      matchingTags: asStringArray(record.matching_tags),
+    },
   };
 }
 
 function normalizeLead(raw: unknown, fallbackPhone: string): RuntimeLead {
   const record = asRecord(raw);
-
   return {
     contactId: asString(record.id) ?? asString(record.contact_id),
     phone: asString(record.phone) ?? asString(record.whatsapp_number) ?? fallbackPhone,
@@ -93,12 +119,27 @@ function normalizeLead(raw: unknown, fallbackPhone: string): RuntimeLead {
   };
 }
 
-export async function fetchLeadContextByPhone(phone: string): Promise<{
-  contact: RuntimeLead;
-  recentInteractions: Array<Record<string, unknown>>;
-  activeOffers: RuntimeOffer[];
-  runtimeFlags: Record<string, unknown>;
-}> {
+function normalizeLastPresentedOffers(raw: unknown): LastPresentedOffer[] {
+  if (!Array.isArray(raw)) return [];
+
+  const result: LastPresentedOffer[] = [];
+  for (const item of raw) {
+    const record = asRecord(item);
+    const index = asNumber(record.index);
+    const offerId = asString(record.offer_id) ?? asString(record.offerId);
+    if (!index || !offerId) continue;
+
+    result.push({
+      index,
+      offerId,
+      title: asString(record.title) ?? null,
+    });
+  }
+
+  return result;
+}
+
+export async function fetchLeadContextByPhone(phone: string): Promise<BridgeLeadContext> {
   const payload = await bridgeFetch('/api/public/runtime/lead-context', {
     method: 'POST',
     body: JSON.stringify({ phone }),
@@ -114,12 +155,17 @@ export async function fetchLeadContextByPhone(phone: string): Promise<{
     : Array.isArray(payload.activeOffers)
       ? payload.activeOffers
       : [];
+  const conversationMemory = asRecord(payload.conversation_memory ?? payload.conversationMemory);
 
   return {
     contact: normalizeLead(payload.contact, phone),
     recentInteractions: recentInteractionsRaw.map((item) => asRecord(item)),
     activeOffers: activeOffersRaw.map(normalizeOffer).filter((offer): offer is RuntimeOffer => Boolean(offer)),
     runtimeFlags: asRecord(payload.runtime_flags ?? payload.runtimeFlags),
+    conversationMemory: {
+      lastPresentedOffers: normalizeLastPresentedOffers(conversationMemory.last_presented_offers),
+      lastPresentedAt: asString(conversationMemory.last_presented_offers_at),
+    },
   };
 }
 
@@ -131,11 +177,7 @@ export async function generateReplyViaBridge(payload: {
   must_include?: string[];
   must_not_include?: string[];
   fallback_reply: string;
-}): Promise<{
-  replyText: string;
-  usedFallback: boolean;
-  raw: Record<string, unknown>;
-}> {
+}): Promise<{ replyText: string; usedFallback: boolean; raw: Record<string, unknown> }> {
   const result = await bridgeFetch('/api/public/runtime/generate-reply', {
     method: 'POST',
     body: JSON.stringify(payload),
@@ -144,41 +186,7 @@ export async function generateReplyViaBridge(payload: {
   const replyText = asString(result.reply_text) ?? payload.fallback_reply;
   const usedFallback = Boolean(result.used_fallback) || replyText === payload.fallback_reply;
 
-  return {
-    replyText,
-    usedFallback,
-    raw: result,
-  };
-}
-
-export async function fetchActiveOffersFromSupabase(): Promise<RuntimeOffer[]> {
-  throw new Error('Direct offer fetch is disabled. Use fetchLeadContextByPhone via Lovable bridge.');
-}
-
-export async function fetchLeadByPhoneFromSupabase(phone: string): Promise<RuntimeLead | null> {
-  const context = await fetchLeadContextByPhone(phone);
-  return context.contact;
-}
-
-export async function ensureContactByPhone(params: { phone: string; firstName?: string | null }): Promise<RuntimeLead> {
-  const context = await fetchLeadContextByPhone(params.phone);
-  return {
-    ...context.contact,
-    firstName: context.contact.firstName ?? params.firstName ?? null,
-  };
-}
-
-export async function hasProcessedMetaMessage(_messageId: string): Promise<boolean> {
-  return false;
-}
-
-export async function recordInboundMetaWebhook(_params: {
-  messageId: string;
-  phone: string;
-  payload: Record<string, unknown>;
-  status?: 'received' | 'processed' | 'skipped_duplicate' | 'failed';
-}) {
-  return;
+  return { replyText, usedFallback, raw: result };
 }
 
 export async function persistHandoffRequest(params: {
@@ -189,7 +197,7 @@ export async function persistHandoffRequest(params: {
   resolvedOfferId?: string | null;
   reason: string;
   runtimeTrace: Record<string, unknown>;
-}) {
+}): Promise<Record<string, unknown>> {
   return bridgeFetch('/api/public/runtime/handoff', {
     method: 'POST',
     body: JSON.stringify({
@@ -216,6 +224,7 @@ export async function persistRuntimeWritebacks(params: {
   trace: Record<string, unknown>;
 }) {
   const leadWriteback = params.writebacks.find((item) => item.type === 'lead_state_upsert') ?? {};
+  const presentedOffers = params.writebacks.find((item) => item.type === 'last_presented_offers_memory');
 
   await bridgeFetch('/api/public/runtime/writeback', {
     method: 'POST',
@@ -234,19 +243,10 @@ export async function persistRuntimeWritebacks(params: {
         current_offer_id: (leadWriteback as Record<string, unknown>).currentOfferId ?? null,
         lead_stage: (leadWriteback as Record<string, unknown>).leadStage ?? null,
       },
+      last_presented_offers: Array.isArray((presentedOffers as Record<string, unknown> | undefined)?.items)
+        ? (presentedOffers as Record<string, unknown>).items
+        : undefined,
       trace: params.trace,
     }),
   });
-
-  if (params.mode === 'handoff') {
-    await persistHandoffRequest({
-      contactId: params.contactId ?? null,
-      phone: params.phone,
-      latestInboundMessage: params.messageText,
-      latestOutboundMessage: params.replyText,
-      resolvedOfferId: params.resolvedOfferId ?? null,
-      reason: 'runtime_handoff',
-      runtimeTrace: params.trace,
-    });
-  }
 }
