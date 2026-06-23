@@ -305,7 +305,7 @@ export async function runTamarTurnEngine(input: TamarTurnRequest): Promise<Tamar
       status: mode === 'handoff' ? 'queued' : 'none',
     },
     trace: {
-      engine: 'tamar-turn-engine-v1-lean-sales',
+      engine: 'tamar-turn-engine-v2-deterministic-fix',\n      patch_marker: 'deterministic_fix_batch_2026_06_23',
       receivedMessageText: input.messageText,
       detectedMode: mode,
       reasons,
