@@ -7,7 +7,7 @@ import { detectDestination, resolveOfferByDestination, resolveOfferByPresentedIn
 const BROWSE_RE = /מה יש|מה יש לכם|מה יש לך|להציע|הכל|כל הטיולים|איזה טיולים|טיולים לחו|יעדים|אפשרויות|זה הכל|יש עוד/i;
 const SHOW_ALL_RE = /הכל|כל הטיולים|כל האפשרויות|תראי לי הכל|תראה לי הכל|מה יש לכם|מה יש לך להציע/i;
 const PRICE_RE = /מחיר|כמה עולה|כמה זה עולה|עלות/i;
-const OPENER_RE = /^(היי|הי|שלום|אהלן|היי תמר|הי תמר|בוקר טוב|ערב טוב)\s*$/i;
+const OPENER_RE = /^(היי|הי|שלום|אהלן|היי תמר|הי תמר|בוקר טוב|ערב טוב)\\s*$/i;
 const FRIEND_RE = /חבר|חברה|ידידה|ידיד|ביחד|לבוא עם/i;
 const SOLO_RE = /לבד|סולו|solo/i;
 const CORRECTION_RE = /^(לא|לא זה|לא,|לא זה אני מדבר על|אני מדבר על|התכוונתי ל|לא אני מתכוון ל|לא, אני מתכוון ל)/i;
@@ -73,14 +73,14 @@ function buildBrowseReply(name, offers) {
             presented: [],
         };
     }
-    const shortlist = offers.slice(0, 6);
-    const lines = shortlist.map((offer, index) => {
+    // Show ALL active offers, not just 6. Deterministic browse output.
+    const lines = offers.map((offer, index) => {
         const pricePart = offer.price ? ` — החל מ-${offer.price}${offer.currency ?? '₪'}` : '';
         return `${index + 1}. ${offer.title}${pricePart}`;
     });
     return {
         text: `${greetName(name)}כרגע אלה הטיולים הפעילים שאני יכולה להציע:\n${lines.join('\n')}\n\nאם אחד מהם מושך אותך, תכתוב לי את המספר שלו או את היעד עצמו ואני אמשיך משם.`,
-        presented: shortlist.map((offer, index) => ({ index: index + 1, offerId: offer.id, title: offer.title })),
+        presented: offers.map((offer, index) => ({ index: index + 1, offerId: offer.id, title: offer.title })),
     };
 }
 function buildOfferReply(name, offer) {
@@ -193,10 +193,13 @@ export async function runTamarTurnEngine(input) {
     const destination = detected.destination;
     let fallbackReply;
     let presentedOffersMemory = [];
+    let useLlmReply = true;
     if (mode === 'browse') {
         const browse = buildBrowseReply(leadState.firstName, offers);
         fallbackReply = browse.text;
         presentedOffersMemory = browse.presented;
+        // For browse mode, use deterministic output directly. Do NOT call LLM.
+        useLlmReply = false;
     }
     else if (mode === 'handoff') {
         let handoffStatus = 'queued';
@@ -229,33 +232,42 @@ export async function runTamarTurnEngine(input) {
         fallbackReply = buildGenericReply(leadState.firstName);
     }
     const actions = shouldShareRegistrationLink(mode, offer) ? [registrationLinkAction(offer)] : [];
-    const llmReply = await generateReplyViaBridge({
-        identity: {
-            name: 'תמר',
-            language: 'he',
-            tone: 'warm_natural_direct',
-            sales_intensity: 'medium',
-            emoji_policy: 'few',
-            verbosity: 'short',
-            gender_sensitive_hebrew: true,
-        },
-        turn_context: {
-            user_message: input.messageText,
-            mode,
-            contact_first_name: leadState.firstName,
-            resolved_offer: offer,
-            active_offers: offers.slice(0, 6),
-            recent_interactions: bridgeContext.recentInteractions.slice(-6),
-            last_presented_offers: bridgeContext.conversationMemory.lastPresentedOffers,
-        },
-        objective: buildObjective(mode, offer),
-        hard_rules: buildHardRules(mode, offer, actions.length > 0),
-        must_include: buildMustInclude(mode, fallbackReply),
-        must_not_include: buildMustNotInclude(),
-        fallback_reply: fallbackReply,
-    });
+    let replyText = fallbackReply;
+    let llmUsedFallback = true;
+    let llmRaw = {};
+    if (useLlmReply) {
+        const llmReply = await generateReplyViaBridge({
+            identity: {
+                name: 'תמר',
+                language: 'he',
+                tone: 'warm_natural_direct',
+                sales_intensity: 'medium',
+                emoji_policy: 'few',
+                verbosity: 'short',
+                gender_sensitive_hebrew: true,
+            },
+            turn_context: {
+                user_message: input.messageText,
+                mode,
+                contact_first_name: leadState.firstName,
+                resolved_offer: offer,
+                active_offers: offers.slice(0, 6),
+                recent_interactions: bridgeContext.recentInteractions.slice(-6),
+                last_presented_offers: bridgeContext.conversationMemory.lastPresentedOffers,
+            },
+            objective: buildObjective(mode, offer),
+            hard_rules: buildHardRules(mode, offer, actions.length > 0),
+            must_include: buildMustInclude(mode, fallbackReply),
+            must_not_include: buildMustNotInclude(),
+            fallback_reply: fallbackReply,
+            inbound_message_id: input.messageId,
+        });
+        replyText = llmReply.replyText;
+        llmUsedFallback = llmReply.usedFallback;
+        llmRaw = llmReply.raw;
+    }
     return {
-        replyText: llmReply.replyText,
+        replyText,
         mode,
         reasons,
         resolvedOfferId: offer?.id ?? null,
@@ -267,7 +279,7 @@ export async function runTamarTurnEngine(input) {
         },
         trace: {
             engine: 'tamar-turn-engine-v2-deterministic-fix',
-            patch_marker: 'deterministic_fix_batch_2026_06_23',
+            patch_marker: 'browse_deterministic_all_offers_2026_06_24',
             receivedMessageText: input.messageText,
             detectedMode: mode,
             reasons,
@@ -284,8 +296,9 @@ export async function runTamarTurnEngine(input) {
             conversationMemory: bridgeContext.conversationMemory,
             selectionMemoryUsed: detected.selectionMemoryUsed,
             fallbackReply,
-            llmReplyUsedFallback: llmReply.usedFallback,
-            llmReplyRaw: llmReply.raw,
+            llmReplyUsedFallback: llmUsedFallback,
+            llmReplyRaw: llmRaw,
+            browseModeDeterministic: mode === 'browse',
         },
         version: versionInfo(),
     };

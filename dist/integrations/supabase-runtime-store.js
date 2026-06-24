@@ -169,6 +169,7 @@ export async function persistRuntimeWritebacks(params) {
             phone: params.phone,
             contact_id: params.contactId ?? null,
             message_id: params.messageId ?? null,
+            inbound_message_id: params.messageId ?? null,
             inbound_text: params.messageText,
             outbound_text: params.replyText,
             mode: params.mode,
