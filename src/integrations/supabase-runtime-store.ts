@@ -177,6 +177,7 @@ export async function generateReplyViaBridge(payload: {
   must_include?: string[];
   must_not_include?: string[];
   fallback_reply: string;
+  inbound_message_id?: string;
 }): Promise<{ replyText: string; usedFallback: boolean; raw: Record<string, unknown> }> {
   const result = await bridgeFetch('/api/public/runtime/generate-reply', {
     method: 'POST',
@@ -232,6 +233,7 @@ export async function persistRuntimeWritebacks(params: {
       phone: params.phone,
       contact_id: params.contactId ?? null,
       message_id: params.messageId ?? null,
+      inbound_message_id: params.messageId ?? null,
       inbound_text: params.messageText,
       outbound_text: params.replyText,
       mode: params.mode,
@@ -250,3 +252,4 @@ export async function persistRuntimeWritebacks(params: {
     }),
   });
 }
+

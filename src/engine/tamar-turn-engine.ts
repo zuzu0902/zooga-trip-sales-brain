@@ -14,7 +14,7 @@ import { detectDestination, resolveOfferByDestination, resolveOfferByPresentedIn
 const BROWSE_RE = /מה יש|מה יש לכם|מה יש לך|להציע|הכל|כל הטיולים|איזה טיולים|טיולים לחו|יעדים|אפשרויות|זה הכל|יש עוד/i;
 const SHOW_ALL_RE = /הכל|כל הטיולים|כל האפשרויות|תראי לי הכל|תראה לי הכל|מה יש לכם|מה יש לך להציע/i;
 const PRICE_RE = /מחיר|כמה עולה|כמה זה עולה|עלות/i;
-const OPENER_RE = /^(היי|הי|שלום|אהלן|היי תמר|הי תמר|בוקר טוב|ערב טוב)\s*$/i;
+const OPENER_RE = /^(היי|הי|שלום|אהלן|היי תמר|הי תמר|בוקר טוב|ערב טוב)\\s*$/i;
 const FRIEND_RE = /חבר|חברה|ידידה|ידיד|ביחד|לבוא עם/i;
 const SOLO_RE = /לבד|סולו|solo/i;
 const CORRECTION_RE = /^(לא|לא זה|לא,|לא זה אני מדבר על|אני מדבר על|התכוונתי ל|לא אני מתכוון ל|לא, אני מתכוון ל)/i;
@@ -291,6 +291,7 @@ export async function runTamarTurnEngine(input: TamarTurnRequest): Promise<Tamar
     must_include: buildMustInclude(mode, fallbackReply),
     must_not_include: buildMustNotInclude(),
     fallback_reply: fallbackReply,
+    inbound_message_id: input.messageId,
   });
 
   return {
@@ -329,3 +330,4 @@ export async function runTamarTurnEngine(input: TamarTurnRequest): Promise<Tamar
     version: versionInfo(),
   };
 }
+
